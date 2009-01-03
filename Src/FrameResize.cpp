@@ -82,7 +82,7 @@ int main(int ArgC, char **ArgV)
 		DstW=atoi(Dims);
 		DstH=atoi(XPos1+1);
 
-		if(DstW<10 || DstH<10 || DstW<DstH){
+		if(DstW<10 || DstH<10){
 			Result=ERR_ARGS;
 			break;
 		}
@@ -188,7 +188,7 @@ int ProcessFile(char *Path,char *DstDir)
 	bool FrameLandscape;
 	bool Landscape;
 	double TargetRatio;
-	int TargetSize;
+	unsigned int TargetSize;
 	Geometry Geom;
 
 	do{
@@ -307,7 +307,7 @@ int ProcessFile(char *Path,char *DstDir)
 		}
 		else{
 			// Work out how many cols to chop out
-			TargetSize=(int)((double) Picture.rows() * TargetRatio);
+			TargetSize=(int)((double) Picture.rows() / TargetRatio);
 			Geom.width(TargetSize);
 			Geom.height(Picture.rows());
 			Geom.xOff((Picture.columns()-TargetSize)/2);
