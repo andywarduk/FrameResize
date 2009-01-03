@@ -1,0 +1,10 @@
+Makefile
+Makefile.in
+configure
+config.status
+aclocal.m4
+config.log
+depcomp
+install-sh
+missing
+*~
