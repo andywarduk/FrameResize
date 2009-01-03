@@ -17,27 +17,77 @@ using namespace Magick;
 #define ERR_PICWRERR	-5
 #define ERR_FATAL	-6
 #define ERR_NOTD	-7
+#define ERR_ARGS	-8
 #define ERR_BREAK	-100
 
-// TODO parameterise
-char *SrcDir="/home/ajw/Src/FrameResize/Test/Src";
-char *DstDir="/home/ajw/Src/FrameResize/Test/Dst";
-bool Verbose=true;
-int DstH=480;
-int DstW=800;
+char *SrcDir;
+char *DstDir;
+bool Verbose=false;
+int DstH;
+int DstW;
 
 int FileMode(char *Path,mode_t *Mode);
 int ProcessFile(char *Path,char *DstDir);
 int ScanDir(char *SrcDir,char *DstDir);
+bool SkipDir(char *Dir);
 int CreateDirectory(char *Dir);
+void Usage();
+
+void Usage()
+{
+	fprintf(stdout,"Usage: FrameResize [-v] SrcDir DstDir Dimensions\n"
+                       "  where: -v         = Verbose messages\n"
+                       "         SrcDir     = Source picture directory\n"
+                       "         DstDir     = Destination picture directory\n"
+                       "         Dimensions = Target dimensions (wwwxhhh)\n");
+}
 
 int main(int ArgC, char **ArgV)
 {
 	int Result=0;
+	int Option;
 	mode_t DirMode;
+	char *Dims;
+	char *XPos1,*XPos2;
 
 	do{
-//		getopt();
+		while((Option=getopt(ArgC,ArgV,"v"))!=-1){
+			switch(Option){
+			case 'v':
+				Verbose=true;
+				break;
+			default:
+				Result=ERR_ARGS;
+				break;
+			}
+		}
+		if(Result!=0) break;
+
+		if(ArgC-optind != 3){
+			Result=ERR_ARGS;
+			break;
+		}
+
+		SrcDir=ArgV[optind];
+		DstDir=ArgV[optind+1];
+		Dims=ArgV[optind+2];
+
+		XPos1=strchr(Dims,'x');
+		XPos2=strrchr(Dims,'x');
+		if(XPos1==NULL || XPos1!=XPos2){
+			Result=ERR_ARGS;
+			break;
+		}
+		*XPos1='\x0';
+		DstW=atoi(Dims);
+		DstH=atoi(XPos1+1);
+
+		if(DstW<10 || DstH<10 || DstW<DstH){
+			Result=ERR_ARGS;
+			break;
+		}
+
+		if(Verbose) fprintf(stdout,"Converting %s to %s, size %dx%d\n",SrcDir,DstDir,DstW,DstH);
 
 		// Check dst dir exists
 		Result=FileMode(DstDir,&DirMode);
@@ -68,6 +118,10 @@ int main(int ArgC, char **ArgV)
 		Result=ScanDir(SrcDir,DstDir);
 	} while(0);
 
+	if(Result==ERR_ARGS){
+		Usage();
+	}
+
 	exit(Result);
 }
 
@@ -80,39 +134,44 @@ int ScanDir(char *SrcDir,char *DstDir)
 	char NewDstDir[PATH_MAX+1];
 	mode_t Mode;
 
-	if(Verbose) fprintf(stdout,"Scanning directory %s...\n",SrcDir);
-	DirHandle=opendir(SrcDir);
-	if(DirHandle==NULL){
-		perror("opendir");
-		Result=10;
+	if(SkipDir(SrcDir)){
+		if(Verbose) fprintf(stdout,"Skipping directory %s...\n",SrcDir);
 	}
 	else{
-		while(true){
-			DirEnt=readdir(DirHandle);
-			if(DirEnt==NULL){
-				break;
-			}
-			if(strcmp(DirEnt->d_name,".")!=0 && strcmp(DirEnt->d_name,"..")!=0){
-				sprintf(FilePath,"%s/%s",SrcDir,DirEnt->d_name);
-				Result=FileMode(FilePath,&Mode);
-				if(Result!=0){
-					perror("lstat");
+		if(Verbose) fprintf(stdout,"Scanning directory %s...\n",SrcDir);
+		DirHandle=opendir(SrcDir);
+		if(DirHandle==NULL){
+			perror("opendir");
+			Result=errno;
+		}
+		else{
+			while(true){
+				DirEnt=readdir(DirHandle);
+				if(DirEnt==NULL){
 					break;
 				}
-				if(S_ISREG(Mode)){
-					Result=ProcessFile(FilePath,DstDir);
+				if(strcmp(DirEnt->d_name,".")!=0 && strcmp(DirEnt->d_name,"..")!=0){
+					sprintf(FilePath,"%s/%s",SrcDir,DirEnt->d_name);
+					Result=FileMode(FilePath,&Mode);
+					if(Result!=0){
+						perror("lstat");
+						break;
+					}
+					if(S_ISREG(Mode)){
+						Result=ProcessFile(FilePath,DstDir);
+					}
+					else if(S_ISDIR(Mode)){
+						sprintf(NewDstDir,"%s/%s",DstDir,DirEnt->d_name);
+						Result=ScanDir(FilePath,NewDstDir);
+					}
+					else{
+						if(Verbose) fprintf(stderr,"Skipping %s",FilePath);
+					}
+					if(Result!=0) break;
 				}
-				else if(S_ISDIR(Mode)){
-					sprintf(NewDstDir,"%s/%s",DstDir,DirEnt->d_name);
-					Result=ScanDir(FilePath,NewDstDir);
-				}
-				else{
-					if(Verbose) fprintf(stderr,"Skipping %s",FilePath);
-				}
-				if(Result!=0) break;
 			}
+			closedir(DirHandle);
 		}
-		closedir(DirHandle);
 	}
 	
 	return Result;
@@ -126,15 +185,11 @@ int ProcessFile(char *Path,char *DstDir)
 	char *FName;
 	mode_t Mode;
 	double XScale,YScale;
-	int Orientation;
-	bool FileLandscape;
-	bool DispLandscape;
+	bool FrameLandscape;
+	bool Landscape;
 	double TargetRatio;
 	int TargetSize;
-	int CropW;
-	int CropH;
-	int CropX;
-	int CropY;
+	Geometry Geom;
 
 	do{
 		if(Verbose) fprintf(stdout,"Processing file %s...\n",Path);
@@ -187,39 +242,31 @@ int ProcessFile(char *Path,char *DstDir)
 		}
 
 		// Work out image orientation
-		Orientation=atoi(Picture.attribute("EXIF:Orientation").c_str());
-
 		XScale=Picture.xResolution()*Picture.columns();
 		YScale=Picture.xResolution()*Picture.rows();
 
 		if(XScale<=YScale){
-			FileLandscape=false;
+			Landscape=false;
 		}
 		else{
-			FileLandscape=true;
+			Landscape=true;
 		}
 
-		switch(Orientation){
-		case 5:
-		case 6:
-		case 7:
-		case 8:
-			// Exif tag triggers rotation
-			DispLandscape=!FileLandscape;
-			break;
-		default:
-			DispLandscape=FileLandscape;
-			break;
+		if(DstW<=DstH){
+			FrameLandscape=false;
+		}
+		else{
+			FrameLandscape=true;
 		}
 
-		if(Verbose) fprintf(stdout,"  Size=%dx%d (%.2f MP), Resolution=%.0fx%.0f, Orientation=%d, Type=%s\n",Picture.columns(),Picture.rows(),
+		if(Verbose) fprintf(stdout,"  Size=%dx%d (%.1f MP), Resolution=%.0fx%.0f, Orientation=%s, Type=%s\n",Picture.columns(),Picture.rows(),
 			((double) Picture.columns() * (double) Picture.rows()) / 1000000.0,
 			Picture.xResolution(),Picture.yResolution(),
-			Orientation,
+			(Landscape?"Landscape":"Portrait"),
 			Picture.magick().c_str());
 		
-		if(!DispLandscape){
-			fprintf(stdout,"Skipping %s (image is portrait)\n",Path);			
+		if(Landscape!=FrameLandscape){
+			fprintf(stdout,"Skipping %s (image is wrong orientation for frame)\n",Path);
 			break;
 		}
 
@@ -248,29 +295,31 @@ int ProcessFile(char *Path,char *DstDir)
 		if(Verbose) fprintf(stdout,"  Outputting to file %s\n",OutPath);
 
 		// Crop the image
-		if(FileLandscape){
+		TargetRatio=(double) DstH / (double) DstW;
+		Geom=Geometry();
+		if(Landscape){
 			// Work out how many rows to chop out
-			TargetRatio=(double) DstH / (double) DstW;
 			TargetSize=(int)((double) Picture.columns() * TargetRatio);
-			CropW=Picture.columns();
-			CropH=TargetSize;
-			CropX=0;
-			CropY=(Picture.rows()-TargetSize)/2;
+			Geom.width(Picture.columns());
+			Geom.height(TargetSize);
+			Geom.xOff(0);
+			Geom.yOff((Picture.rows()-TargetSize)/2);
 		}
 		else{
 			// Work out how many cols to chop out
-			TargetRatio=(double) DstW / (double) DstH;
 			TargetSize=(int)((double) Picture.rows() * TargetRatio);
-			CropW=TargetSize;
-			CropH=Picture.rows();
-			CropX=(Picture.columns()-TargetSize)/2;
-			CropY=0;
+			Geom.width(TargetSize);
+			Geom.height(Picture.rows());
+			Geom.xOff((Picture.columns()-TargetSize)/2);
+			Geom.yOff(0);
 		}
-		if(Verbose) fprintf(stdout,"  Cropping to %dx%d at %dx%d\n",CropW,CropH,CropX,CropY);
-		Picture.crop(Geometry(CropW,CropH,CropX,CropY));
+		if(Verbose) fprintf(stdout,"  Cropping to %dx%d at %dx%d\n",Geom.width(),Geom.height(),Geom.xOff(),Geom.yOff());
+		Picture.crop(Geom);
 
 		// Zoom the image
-		Picture.zoom(Geometry(DstW,DstH));
+		Geom=Geometry(DstW,DstH);
+		Geom.aspect(true);
+		Picture.zoom(Geom);
 
 		// Save the image
 		try{
@@ -287,6 +336,21 @@ int ProcessFile(char *Path,char *DstDir)
 	if(Result==ERR_BREAK) Result=0;
 
 	return Result;
+}
+
+bool SkipDir(char *Dir)
+{
+	bool Skip=false;
+	char TokenPath[NAME_MAX];
+	mode_t Mode;
+
+	if(strcmp(Dir,DstDir)==0) Skip=true;
+	else{
+		sprintf(TokenPath,"%s/.FrameSkip",Dir);
+		if(FileMode(TokenPath,&Mode)==0) Skip=true;
+	}
+
+	return Skip;
 }
 
 int CreateDirectory(char *Dir)
