@@ -20,11 +20,19 @@ using namespace Magick;
 #define ERR_ARGS	-8
 #define ERR_BREAK	-100
 
+enum Orientation {
+	Portrait,
+	Landscape,
+	Square
+};
+
 char *SrcDir;
 char *DstDir;
 bool Verbose=false;
 int DstH;
 int DstW;
+double FrameRatio;
+Orientation FrameOrient;
 
 int FileMode(char *Path,mode_t *Mode);
 int ProcessFile(char *Path,char *DstDir);
@@ -32,6 +40,7 @@ int ScanDir(char *SrcDir,char *DstDir);
 bool SkipDir(char *Dir);
 int CreateDirectory(char *Dir);
 void Usage();
+const char *OrientDesc(Orientation Orient);
 
 void Usage()
 {
@@ -51,6 +60,7 @@ int main(int ArgC, char **ArgV)
 	char *XPos1,*XPos2;
 
 	do{
+		// Parse args
 		while((Option=getopt(ArgC,ArgV,"v"))!=-1){
 			switch(Option){
 			case 'v':
@@ -63,15 +73,18 @@ int main(int ArgC, char **ArgV)
 		}
 		if(Result!=0) break;
 
+		// Need 3 args remaining
 		if(ArgC-optind != 3){
 			Result=ERR_ARGS;
 			break;
 		}
 
+		// Get 3 remaining args
 		SrcDir=ArgV[optind];
 		DstDir=ArgV[optind+1];
 		Dims=ArgV[optind+2];
 
+		// Parse dimensions arg
 		XPos1=strchr(Dims,'x');
 		XPos2=strrchr(Dims,'x');
 		if(XPos1==NULL || XPos1!=XPos2){
@@ -82,14 +95,22 @@ int main(int ArgC, char **ArgV)
 		DstW=atoi(Dims);
 		DstH=atoi(XPos1+1);
 
+		// Check dimensions are sensible
 		if(DstW<10 || DstH<10){
 			Result=ERR_ARGS;
 			break;
 		}
 
-		if(Verbose) fprintf(stdout,"Converting %s to %s, size %dx%d\n",SrcDir,DstDir,DstW,DstH);
+		// Work out frame ratio and orientation
+		FrameRatio=(double) DstW / (double) DstH;
+		if(FrameRatio==1.0) FrameOrient=Square;
+		else if(FrameRatio<1.0) FrameOrient=Portrait;
+		else FrameOrient=Landscape;
 
-		// Check dst dir exists
+		// Dump what we are about to do
+		if(Verbose) fprintf(stdout,"Converting %s to %s, size %dx%d (%s)\n",SrcDir,DstDir,DstW,DstH,OrientDesc(FrameOrient));
+
+		// Check dst dir exists and is a directory
 		Result=FileMode(DstDir,&DirMode);
 		if(Result!=0){
 			fprintf(stderr,"Destination directory %s does not exist\n",DstDir);
@@ -102,7 +123,7 @@ int main(int ArgC, char **ArgV)
 			break;	
 		}
 		
-		// Check src dir exists
+		// Check src dir exists and is a directory
 		Result=FileMode(SrcDir,&DirMode);
 		if(Result!=0){
 			fprintf(stderr,"Source directory %s does not exist\n",SrcDir);
@@ -115,6 +136,7 @@ int main(int ArgC, char **ArgV)
 			break;	
 		}
 
+		// Process
 		Result=ScanDir(SrcDir,DstDir);
 	} while(0);
 
@@ -185,9 +207,8 @@ int ProcessFile(char *Path,char *DstDir)
 	char *FName;
 	mode_t Mode;
 	double XScale,YScale;
-	bool FrameLandscape;
-	bool Landscape;
-	double TargetRatio;
+	double ImageRatio;
+	Orientation ImageOrient;
 	unsigned int TargetSize;
 	Geometry Geom;
 
@@ -242,30 +263,23 @@ int ProcessFile(char *Path,char *DstDir)
 		}
 
 		// Work out image orientation
-		XScale=Picture.xResolution()*Picture.columns();
-		YScale=Picture.xResolution()*Picture.rows();
+		XScale = Picture.xResolution() * Picture.columns();
+		YScale = Picture.yResolution() * Picture.rows();
 
-		if(XScale<=YScale){
-			Landscape=false;
-		}
-		else{
-			Landscape=true;
-		}
+		ImageRatio=XScale / YScale;
+		if(ImageRatio==1.0) ImageOrient=Square;
+		else if(ImageRatio<1.0) ImageOrient=Portrait;
+		else ImageOrient=Landscape;
 
-		if(DstW<=DstH){
-			FrameLandscape=false;
-		}
-		else{
-			FrameLandscape=true;
-		}
-
+		// Dump image characteristics
 		if(Verbose) fprintf(stdout,"  Size=%dx%d (%.1f MP), Resolution=%.0fx%.0f, Orientation=%s, Type=%s\n",Picture.columns(),Picture.rows(),
 			((double) Picture.columns() * (double) Picture.rows()) / 1000000.0,
 			Picture.xResolution(),Picture.yResolution(),
-			(Landscape?"Landscape":"Portrait"),
+			OrientDesc(ImageOrient),
 			Picture.magick().c_str());
 		
-		if(Landscape!=FrameLandscape){
+		// Check image orientation is compatible
+		if(FrameOrient!=Square && ImageOrient!=Square && ImageOrient!=FrameOrient){
 			fprintf(stdout,"Skipping %s (image is wrong orientation for frame)\n",Path);
 			break;
 		}
@@ -295,30 +309,31 @@ int ProcessFile(char *Path,char *DstDir)
 		if(Verbose) fprintf(stdout,"  Outputting to file %s\n",OutPath);
 
 		// Crop the image
-		TargetRatio=(double) DstH / (double) DstW;
-		Geom=Geometry();
-		if(Landscape){
-			// Work out how many rows to chop out
-			TargetSize=(int)((double) Picture.columns() * TargetRatio);
-			Geom.width(Picture.columns());
-			Geom.height(TargetSize);
-			Geom.xOff(0);
-			Geom.yOff((Picture.rows()-TargetSize)/2);
+		if(ImageRatio!=FrameRatio){
+			Geom=Geometry();
+			if(ImageRatio<FrameRatio){
+				// Work out how many rows to chop out
+				TargetSize=(int)((double) Picture.columns() / FrameRatio);
+				Geom.width(Picture.columns());
+				Geom.height(TargetSize);
+				Geom.xOff(0);
+				Geom.yOff((Picture.rows()-TargetSize)/2);
+			}
+			else{
+				// Work out how many cols to chop out
+				TargetSize=(int)((double) Picture.rows() * FrameRatio);
+				Geom.width(TargetSize);
+				Geom.height(Picture.rows());
+				Geom.xOff((Picture.columns()-TargetSize)/2);
+				Geom.yOff(0);
+			}
+			if(Verbose) fprintf(stdout,"  Cropping to %dx%d at %dx%d\n",Geom.width(),Geom.height(),Geom.xOff(),Geom.yOff());
+			Picture.crop(Geom);
 		}
-		else{
-			// Work out how many cols to chop out
-			TargetSize=(int)((double) Picture.rows() / TargetRatio);
-			Geom.width(TargetSize);
-			Geom.height(Picture.rows());
-			Geom.xOff((Picture.columns()-TargetSize)/2);
-			Geom.yOff(0);
-		}
-		if(Verbose) fprintf(stdout,"  Cropping to %dx%d at %dx%d\n",Geom.width(),Geom.height(),Geom.xOff(),Geom.yOff());
-		Picture.crop(Geom);
 
 		// Zoom the image
 		Geom=Geometry(DstW,DstH);
-		Geom.aspect(true);
+		Geom.aspect(true); // Ignore original aspect ratio
 		Picture.zoom(Geom);
 
 		// Save the image
@@ -397,3 +412,18 @@ int FileMode(char *Path,mode_t *Mode)
 
 	return Result;
 }
+
+const char *OrientDesc(Orientation Orient)
+{
+	switch(Orient){
+	case Portrait:
+		return "Portrait";
+	case Landscape:
+		return "Landscape";
+	case Square:
+		return "Square";
+	}
+
+	return "Unknown";
+}
+
