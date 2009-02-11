@@ -31,6 +31,7 @@ char *DstDir;
 bool Verbose=false;
 int DstH;
 int DstW;
+char *Ext=NULL;
 double FrameRatio;
 Orientation FrameOrient;
 
@@ -46,6 +47,7 @@ void Usage()
 {
 	fprintf(stdout,"Usage: FrameResize [-v] SrcDir DstDir Dimensions\n"
                        "  where: -v         = Verbose messages\n"
+                       "         -e ext     = New ext\n"
                        "         SrcDir     = Source picture directory\n"
                        "         DstDir     = Destination picture directory\n"
                        "         Dimensions = Target dimensions (wwwxhhh)\n");
@@ -61,10 +63,13 @@ int main(int ArgC, char **ArgV)
 
 	do{
 		// Parse args
-		while((Option=getopt(ArgC,ArgV,"v"))!=-1){
+		while((Option=getopt(ArgC,ArgV,"ve:"))!=-1){
 			switch(Option){
 			case 'v':
 				Verbose=true;
+				break;
+			case 'e':
+				Ext=optarg;
 				break;
 			default:
 				Result=ERR_ARGS;
@@ -108,7 +113,7 @@ int main(int ArgC, char **ArgV)
 		else FrameOrient=Landscape;
 
 		// Dump what we are about to do
-		if(Verbose) fprintf(stdout,"Converting %s to %s, size %dx%d (%s)\n",SrcDir,DstDir,DstW,DstH,OrientDesc(FrameOrient));
+		if(Verbose) fprintf(stdout,"Converting %s to %s, size %dx%d, ext %s\n",SrcDir,DstDir,DstW,DstH,(Ext==NULL?"default":Ext));
 
 		// Check dst dir exists and is a directory
 		Result=FileMode(DstDir,&DirMode);
@@ -211,6 +216,7 @@ int ProcessFile(char *Path,char *DstDir)
 	Orientation ImageOrient;
 	unsigned int TargetSize;
 	Geometry Geom;
+	char *ExtPos;
 
 	do{
 		if(Verbose) fprintf(stdout,"Processing file %s...\n",Path);
@@ -227,6 +233,16 @@ int ProcessFile(char *Path,char *DstDir)
 
 		// Build destination name
 		sprintf(OutPath,"%s/%s",DstDir,FName);
+		if(Ext!=NULL){
+			ExtPos=strrchr(FName,'.');
+			if(ExtPos==NULL){
+				ExtPos=OutPath+strlen(OutPath);
+			}
+			else{
+				ExtPos=strrchr(OutPath,'.');
+			}
+			sprintf(ExtPos,".%s",Ext);
+		}
 
 		// Check destination doesn't already exist
 		Result=FileMode(OutPath,&Mode);
@@ -261,6 +277,43 @@ int ProcessFile(char *Path,char *DstDir)
 			fprintf(stdout,"Skipping %s (image type could not be determined)\n",Path);
 			break;
 		}
+
+		switch(Picture.orientation()){
+		case TopRightOrientation: // 2, flipped horizontally
+			if(Verbose) fprintf(stdout,"  flipping horizontally to normalise orientation\n");
+			Picture.flop();
+			break;
+		case BottomRightOrientation: // 3, rotated 180
+			if(Verbose) fprintf(stdout,"  flipping horizontally and vertically (180 rotation) to normalise orientation\n");
+			Picture.flip();
+			Picture.flop();
+			break;
+		case BottomLeftOrientation: // 4, flipped vertically
+			if(Verbose) fprintf(stdout,"  flipping vertically to normalise orientation\n");
+			Picture.flip();
+			break;
+		case LeftTopOrientation: // 5, - orient changed
+			if(Verbose) fprintf(stdout,"  rotating 270 to normalise orientation\n");
+			Picture.rotate(270);
+			Picture.flip();
+			break;
+		case RightTopOrientation: // 6, rotated 90 - orient changed
+			if(Verbose) fprintf(stdout,"  rotating 90 to normalise orientation\n");
+			Picture.rotate(90);
+			break;
+		case RightBottomOrientation: // 7, - orient changed
+			if(Verbose) fprintf(stdout,"  rotating 90 and flipping vertically to normalise orientation\n");
+			Picture.rotate(90);
+			Picture.flip();
+			break;
+		case LeftBottomOrientation: // 8, rotated 270 - orient changed
+			if(Verbose) fprintf(stdout,"  rotating 270 to normalise orientation\n");
+			Picture.rotate(270);
+			break;
+		default: // Assume TopLeftOrientation here
+			break;
+		}
+		Picture.orientation(TopLeftOrientation);
 
 		// Work out image orientation
 		XScale = Picture.xResolution() * Picture.columns();
