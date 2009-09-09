@@ -10,6 +10,7 @@
 
 using namespace Magick;
 
+#define ERR_OK		0
 #define ERR_NODST	-1
 #define ERR_NOTDDST	-2
 #define ERR_NOSRC	-3
@@ -55,7 +56,7 @@ void Usage()
 
 int main(int ArgC, char **ArgV)
 {
-	int Result=0;
+	int Result=ERR_OK;
 	int Option;
 	mode_t DirMode;
 	char *Dims;
@@ -154,7 +155,7 @@ int main(int ArgC, char **ArgV)
 
 int ScanDir(char *SrcDir,char *DstDir)
 {
-	int Result=0;
+	int Result=ERR_OK;
 	DIR *DirHandle;
 	struct dirent *DirEnt;
 	char FilePath[PATH_MAX+1];
@@ -206,7 +207,7 @@ int ScanDir(char *SrcDir,char *DstDir)
 
 int ProcessFile(char *Path,char *DstDir)
 {
-	int Result=0;
+	int Result=ERR_OK;
 	Image Picture;
 	char OutPath[NAME_MAX];
 	char *FName;
@@ -261,6 +262,9 @@ int ProcessFile(char *Path,char *DstDir)
 			break;
 		}
 		if(Result!=0) break;
+
+		// Check destination is not skipped
+		// TODO
 
 		// Read file
 		try{
@@ -423,7 +427,7 @@ bool SkipDir(char *Dir)
 
 int CreateDirectory(char *Dir)
 {
-	int Result=0;
+	int Result=ERR_OK;
 	char Parent[NAME_MAX];
 	char *ParentPtr;
 	mode_t Mode;
