@@ -19,7 +19,7 @@ using namespace Magick;
 #define ERR_FATAL	-6
 #define ERR_NOTD	-7
 #define ERR_ARGS	-8
-#define ERR_BREAK	-100
+#define ERR_DSTNF   -9
 
 enum Orientation {
 	Portrait,
@@ -27,8 +27,10 @@ enum Orientation {
 	Square
 };
 
+// Global Parameters
 char *SrcDir;
 char *DstDir;
+char *EditDir=NULL;
 bool Verbose=false;
 int DstH;
 int DstW;
@@ -36,19 +38,24 @@ char *Ext=NULL;
 double FrameRatio;
 Orientation FrameOrient;
 
-int FileMode(char *Path,mode_t *Mode);
+int ScanDir(char *SrcDir,char *EditDir,char *DstDir);
+int ProcessDirEnt(char *File,char *SrcDir,char *EditDir,char *DstDir);
+int ProcessSrcFile(char *File,char *SrcDir,char *EditDir,char *DstDir);
 int ProcessFile(char *Path,char *DstDir);
-int ScanDir(char *SrcDir,char *DstDir);
+int FileMode(char *Path,mode_t *Mode);
 bool SkipDir(char *Dir);
 int CreateDirectory(char *Dir);
 void Usage();
 const char *OrientDesc(Orientation Orient);
+time_t FileTime(struct stat *StatBuf);
+void Perror(const char *Format,...);
 
 void Usage()
 {
-	fprintf(stdout,"Usage: FrameResize [-v] SrcDir DstDir Dimensions\n"
+	fprintf(stdout,"Usage: FrameResize [-v] [-e Ext] [ -s EditDir] SrcDir DstDir Dimensions\n"
                        "  where: -v         = Verbose messages\n"
-                       "         -e ext     = New ext\n"
+                       "         -e Ext     = New file extension\n"
+                       "         -s EditDir = Edited picture directory\n"
                        "         SrcDir     = Source picture directory\n"
                        "         DstDir     = Destination picture directory\n"
                        "         Dimensions = Target dimensions (wwwxhhh)\n");
@@ -64,7 +71,7 @@ int main(int ArgC, char **ArgV)
 
 	do{
 		// Parse args
-		while((Option=getopt(ArgC,ArgV,"ve:"))!=-1){
+		while((Option=getopt(ArgC,ArgV,"ve:s:"))!=-1){
 			switch(Option){
 			case 'v':
 				Verbose=true;
@@ -72,15 +79,20 @@ int main(int ArgC, char **ArgV)
 			case 'e':
 				Ext=optarg;
 				break;
+			case 's':
+				EditDir=optarg;
+				break;
 			default:
+				fprintf(stderr,"Unrecognised option (%c)\n",Option);
 				Result=ERR_ARGS;
 				break;
 			}
 		}
-		if(Result!=0) break;
+		if(Result!=ERR_OK) break;
 
 		// Need 3 args remaining
 		if(ArgC-optind != 3){
+			fputs("SrcDir, DstDir and Dimensions must be supplied\n",stderr);
 			Result=ERR_ARGS;
 			break;
 		}
@@ -94,6 +106,7 @@ int main(int ArgC, char **ArgV)
 		XPos1=strchr(Dims,'x');
 		XPos2=strrchr(Dims,'x');
 		if(XPos1==NULL || XPos1!=XPos2){
+			fputs("Dimensions are invalid\n",stderr);
 			Result=ERR_ARGS;
 			break;
 		}
@@ -103,6 +116,7 @@ int main(int ArgC, char **ArgV)
 
 		// Check dimensions are sensible
 		if(DstW<10 || DstH<10){
+			fputs("Dimensions are too small\n",stderr);
 			Result=ERR_ARGS;
 			break;
 		}
@@ -114,36 +128,57 @@ int main(int ArgC, char **ArgV)
 		else FrameOrient=Landscape;
 
 		// Dump what we are about to do
-		if(Verbose) fprintf(stdout,"Converting %s to %s, size %dx%d, ext %s\n",SrcDir,DstDir,DstW,DstH,(Ext==NULL?"default":Ext));
+		if(Verbose){
+			fprintf(stdout,"Converting %s to %s",SrcDir,DstDir);
+			if(EditDir) fprintf(stdout," (edit directory %s)",EditDir);
+			fprintf(stdout,", size %dx%d",DstW,DstH);
+			if(Ext!=NULL) fprintf(stdout,", new ext %s",Ext);
+			fputs("\n",stdout);
+		}
 
 		// Check dst dir exists and is a directory
 		Result=FileMode(DstDir,&DirMode);
-		if(Result!=0){
+		if(Result!=ERR_OK){
 			fprintf(stderr,"Destination directory %s does not exist\n",DstDir);
 			Result=ERR_NODST;
-			break;	
+			break;
 		}
 		if(!S_ISDIR(DirMode)){
 			fprintf(stderr,"Destination %s is not a directory\n",DstDir);
 			Result=ERR_NOTDDST;
-			break;	
+			break;
 		}
-		
+
 		// Check src dir exists and is a directory
 		Result=FileMode(SrcDir,&DirMode);
-		if(Result!=0){
+		if(Result!=ERR_OK){
 			fprintf(stderr,"Source directory %s does not exist\n",SrcDir);
 			Result=ERR_NOSRC;
-			break;	
+			break;
 		}
 		if(!S_ISDIR(DirMode)){
 			fprintf(stderr,"Source %s is not a directory\n",SrcDir);
 			Result=ERR_NOTDSRC;
-			break;	
+			break;
+		}
+
+		if(EditDir){
+			// Check edit dir exists and is a directory
+			Result=FileMode(EditDir,&DirMode);
+			if(Result!=ERR_OK){
+				fprintf(stderr,"Edit directory %s does not exist\n",EditDir);
+				Result=ERR_NOSRC;
+				break;
+			}
+			if(!S_ISDIR(DirMode)){
+				fprintf(stderr,"Edit %s is not a directory\n",EditDir);
+				Result=ERR_NOTDSRC;
+				break;
+			}
 		}
 
 		// Process
-		Result=ScanDir(SrcDir,DstDir);
+		Result=ScanDir(SrcDir,EditDir,DstDir);
 	} while(0);
 
 	if(Result==ERR_ARGS){
@@ -153,132 +188,228 @@ int main(int ArgC, char **ArgV)
 	exit(Result);
 }
 
-int ScanDir(char *SrcDir,char *DstDir)
+int ScanDir(char *SrcDir,char *EditDir,char *DstDir)
 {
 	int Result=ERR_OK;
 	DIR *DirHandle;
 	struct dirent *DirEnt;
-	char FilePath[PATH_MAX+1];
-	char NewDstDir[PATH_MAX+1];
-	mode_t Mode;
 
 	if(SkipDir(SrcDir)){
 		if(Verbose) fprintf(stdout,"Skipping directory %s...\n",SrcDir);
 	}
 	else{
 		if(Verbose) fprintf(stdout,"Scanning directory %s...\n",SrcDir);
+
+		// Start reading directory contents
 		DirHandle=opendir(SrcDir);
 		if(DirHandle==NULL){
-			perror("opendir");
+			Perror("Failed to open source directory %s",SrcDir);
 			Result=errno;
 		}
 		else{
 			while(true){
+				// Get next directory entry
 				DirEnt=readdir(DirHandle);
-				if(DirEnt==NULL){
-					break;
-				}
+				if(DirEnt==NULL) break;
+
+				// Skip "." and ".." entries
 				if(strcmp(DirEnt->d_name,".")!=0 && strcmp(DirEnt->d_name,"..")!=0){
-					sprintf(FilePath,"%s/%s",SrcDir,DirEnt->d_name);
-					Result=FileMode(FilePath,&Mode);
-					if(Result!=0){
-						perror("lstat");
-						break;
-					}
-					if(S_ISREG(Mode)){
-						Result=ProcessFile(FilePath,DstDir);
-					}
-					else if(S_ISDIR(Mode)){
-						sprintf(NewDstDir,"%s/%s",DstDir,DirEnt->d_name);
-						Result=ScanDir(FilePath,NewDstDir);
-					}
-					else{
-						if(Verbose) fprintf(stderr,"Skipping %s",FilePath);
-					}
-					if(Result!=0) break;
+					// Process this file
+					Result=ProcessDirEnt(DirEnt->d_name,SrcDir,EditDir,DstDir);
+					if(Result!=ERR_OK) break;
 				}
 			}
+
+			// End directory scan
 			closedir(DirHandle);
 		}
 	}
-	
+
 	return Result;
 }
 
-int ProcessFile(char *Path,char *DstDir)
+int ProcessDirEnt(char *File,char *SrcDir,char *EditDir,char *DstDir)
+{
+	int Result=ERR_OK;
+	char FilePath[PATH_MAX+1];
+	char NewEditDir[PATH_MAX+1];
+	char NewDstDir[PATH_MAX+1];
+	mode_t Mode;
+
+	// Build full path to source
+	sprintf(FilePath,"%s/%s",SrcDir,File);
+
+	// Get file mode
+	Result=FileMode(FilePath,&Mode);
+	if(Result!=ERR_OK){
+		// Failed
+		Perror("Failed to stat %s",FilePath);
+	}
+	else{
+		// Check file type
+		if(S_ISREG(Mode)){
+			// Regular file
+			Result=ProcessSrcFile(File,SrcDir,EditDir,DstDir);
+		}
+		else if(S_ISDIR(Mode)){
+			// Directory
+			sprintf(NewEditDir,"%s/%s",EditDir,File);
+			sprintf(NewDstDir,"%s/%s",DstDir,File);
+			Result=ScanDir(FilePath,NewEditDir,NewDstDir);
+		}
+		else{
+			if(Verbose) fprintf(stderr,"Skipping %s",FilePath);
+		}
+	}
+
+	return Result;
+}
+
+int ProcessSrcFile(char *File,char *SrcDir,char *EditDir,char *DstDir)
+{
+	int Result=ERR_OK;
+	char SrcPath[PATH_MAX+1];
+	char DstPath[PATH_MAX+1];
+	struct stat SrcStatBuf;
+	struct stat DstStatBuf;
+	char *FName;
+	char *ExtPos;
+	mode_t Mode;
+
+	do{
+		// Find and lstat source file
+		do{
+			if(EditDir){
+				// Look in edit directory first
+				sprintf(SrcPath,"%s/%s",EditDir,File);
+				if(lstat(SrcPath,&SrcStatBuf)==0){
+					// Got edited file
+					break;
+				}
+				else{
+					switch(errno){
+					case ENOENT:
+						// Does not exist
+						break;
+					default:
+						Result=errno;
+						Perror("Failed to stat %s",SrcPath);
+					}
+					if(Result!=ERR_OK) break;
+				}
+			}
+
+			// Look in source directory
+			sprintf(SrcPath,"%s/%s",SrcDir,File);
+			if(lstat(SrcPath,&SrcStatBuf)!=0){
+				// This shouldn't fail as we've already lstatted it in ProcessDirEnt
+				Result=errno;
+				Perror("Failed to stat %s",SrcPath);
+			}
+		} while(0);
+
+		if(Result!=ERR_OK) break;
+
+		// Calculate destination path
+		sprintf(DstPath,"%s/%s",DstDir,File);
+
+		// Need to replace extension?
+		if(Ext!=NULL){
+			// Get pointer to file name
+			FName=strrchr(DstPath,'/');
+			if(FName==NULL) FName=DstPath;
+			else ++FName;
+
+			// Find extension within filename
+			ExtPos=strrchr(FName,'.');
+			if(ExtPos==NULL){
+				ExtPos=DstPath+strlen(DstPath);
+			}
+			sprintf(ExtPos,".%s",Ext);
+		}
+
+		if(lstat(DstPath,&DstStatBuf)==0){
+			// File already exists
+			if(S_ISREG(DstStatBuf.st_mode)){
+				if(FileTime(&DstStatBuf)>FileTime(&SrcStatBuf)){
+					if(Verbose) fprintf(stdout,"%s newer than %s. skipping\n",DstPath,SrcPath);
+					break;
+				}
+			}
+			else{
+				fprintf(stderr,"%s exists but isn't a regular file\n",DstPath);
+				Result=ERR_DSTNF;
+				break;
+			}
+		}
+		else{
+			switch(errno){
+			case ENOENT:
+				// Does not exist
+				break;
+			default:
+				Result=errno;
+				Perror("Failed to stat %s",DstPath);
+			}
+			if(Result!=ERR_OK) break;
+		}
+
+		// TODO Check if already in skipped list?
+
+		// Make sure parent directory is created
+		Result=FileMode(DstDir,&Mode);
+		switch(Result){
+		case ENOENT:
+			// Create destination directory
+			Result=CreateDirectory(DstDir);
+			if(Result!=ERR_OK){
+				fprintf(stderr,"Error creating directory %s\n",DstDir);
+			}
+			break;
+		case 0:
+			if(!S_ISDIR(Mode)){
+				fprintf(stderr,"  Output directory %s already exists and is not a directory\n",DstDir);
+				Result=ERR_NOTDDST;
+			}
+			break;
+		default:
+			Perror("Failed to stat %s",DstDir);
+			break;
+		}
+		if(Result!=ERR_OK) break;
+
+		ProcessFile(SrcPath,DstPath);
+	} while(0);
+
+	return Result;
+}
+
+int ProcessFile(char *SrcPath,char *DstPath)
 {
 	int Result=ERR_OK;
 	Image Picture;
-	char OutPath[NAME_MAX];
-	char *FName;
-	mode_t Mode;
 	double XScale,YScale;
 	double ImageRatio;
 	Orientation ImageOrient;
 	unsigned int TargetSize;
 	Geometry Geom;
-	char *ExtPos;
 
 	do{
-		if(Verbose) fprintf(stdout,"Processing file %s...\n",Path);
-		if(Verbose) fprintf(stdout,"  Outputting to directory %s\n",DstDir);
-	
-		// Get pointer to file name
-		FName=strrchr(Path,'/');
-		if(FName==NULL){
-			fprintf(stderr,"Unable to determine filename from %s\n",Path);
-			Result=ERR_FATAL;
-			break;
-		}
-		++FName;
-
-		// Build destination name
-		sprintf(OutPath,"%s/%s",DstDir,FName);
-		if(Ext!=NULL){
-			ExtPos=strrchr(FName,'.');
-			if(ExtPos==NULL){
-				ExtPos=OutPath+strlen(OutPath);
-			}
-			else{
-				ExtPos=strrchr(OutPath,'.');
-			}
-			sprintf(ExtPos,".%s",Ext);
-		}
-
-		// Check destination doesn't already exist
-		Result=FileMode(OutPath,&Mode);
-		switch(Result){
-		case 0:
-			if(Verbose){
-				fprintf(stdout,"  Output file %s already exists\n",OutPath);
-				Result=ERR_BREAK;
-			}
-			break;
-		case ENOENT:
-			Result=0;
-			break;
-		default:
-			perror("lstat");
-			break;
-		}
-		if(Result!=0) break;
-
-		// Check destination is not skipped
-		// TODO
+		if(Verbose) fprintf(stdout,"Processing file %s...\n",SrcPath);
 
 		// Read file
 		try{
-			Picture.read(Path);
+			Picture.read(SrcPath);
 		}
 		catch(Error& ReadError)
 		{
-			fprintf(stderr,"Error loading %s (%s)\n",Path,ReadError.what());
+			fprintf(stderr,"Error loading %s (%s)\n",SrcPath,ReadError.what());
 			break;
 		}
 
 		// Check image has an image type filled in (empty files exhibit this behaviour)
 		if(strcmp(Picture.magick().c_str(),"")==0){
-			fprintf(stdout,"Skipping %s (image type could not be determined)\n",Path);
+			fprintf(stdout,"Skipping %s (image type could not be determined)\n",SrcPath);
 			break;
 		}
 
@@ -334,36 +465,14 @@ int ProcessFile(char *Path,char *DstDir)
 			Picture.xResolution(),Picture.yResolution(),
 			OrientDesc(ImageOrient),
 			Picture.magick().c_str());
-		
+
 		// Check image orientation is compatible
 		if(FrameOrient!=Square && ImageOrient!=Square && ImageOrient!=FrameOrient){
-			fprintf(stdout,"Skipping %s (image is wrong orientation for frame)\n",Path);
+			fprintf(stdout,"Skipping %s (image is wrong orientation for frame)\n",SrcPath);
 			break;
 		}
 
-		// Check destination directory exists
-		Result=FileMode(DstDir,&Mode);
-		switch(Result){
-		case ENOENT:
-			// Create destination directory
-			Result=CreateDirectory(DstDir);
-			if(Result!=0){
-				fprintf(stderr,"Error creating directory %s\n",DstDir);
-			}
-			break;
-		case 0:
-			if(!S_ISDIR(Mode)){
-				if(Verbose) fprintf(stdout,"  Output directory %s already exists and is not a directory\n",DstDir);
-				Result=ERR_NOTDDST;
-			}
-			break;
-		default:
-			perror("lstat");
-			break;
-		}
-		if(Result!=0) break;
-		
-		if(Verbose) fprintf(stdout,"  Outputting to file %s\n",OutPath);
+		if(Verbose) fprintf(stdout,"  Outputting to file %s\n",DstPath);
 
 		// Crop the image
 		if(ImageRatio!=FrameRatio){
@@ -395,17 +504,15 @@ int ProcessFile(char *Path,char *DstDir)
 
 		// Save the image
 		try{
-			Picture.write(OutPath);
+			Picture.write(DstPath);
 		}
 		catch(Error& WriteError)
 		{
-			fprintf(stderr,"Error writing %s (%s)\n",OutPath,WriteError.what());
+			fprintf(stderr,"Error writing %s (%s)\n",DstPath,WriteError.what());
 			Result=ERR_PICWRERR;
 			break;
 		}
 	} while(0);
-
-	if(Result==ERR_BREAK) Result=0;
 
 	return Result;
 }
@@ -432,7 +539,7 @@ int CreateDirectory(char *Dir)
 	char *ParentPtr;
 	mode_t Mode;
 
-	if(FileMode(Dir,&Mode)!=0){
+	if(FileMode(Dir,&Mode)!=ERR_OK){
 		strcpy(Parent,Dir);
 		ParentPtr=strrchr(Parent,'/');
 		if(ParentPtr){
@@ -456,11 +563,11 @@ int CreateDirectory(char *Dir)
 
 int FileMode(char *Path,mode_t *Mode)
 {
-	int Result=0;
+	int Result=ERR_OK;
 	struct stat StatBuf;
 
 	Result=lstat(Path,&StatBuf);
-	if(Result==0){
+	if(Result==ERR_OK){
 		*Mode=StatBuf.st_mode;
 	}
 	else{
@@ -484,3 +591,25 @@ const char *OrientDesc(Orientation Orient)
 	return "Unknown";
 }
 
+time_t FileTime(struct stat *StatBuf)
+{
+	time_t Result;
+
+	Result=StatBuf->st_mtime;
+	if(StatBuf->st_ctime>Result){
+		Result=StatBuf->st_ctime;
+	}
+
+	return Result;
+}
+
+void Perror(const char *Format,...)
+{
+	va_list Args;
+
+	va_start(Args,Format);
+	vfprintf(stderr,Format,Args);
+	va_end(Args);
+	fputs(": ",stderr);
+	perror(NULL);
+}
