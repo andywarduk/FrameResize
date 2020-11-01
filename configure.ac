@@ -1,4 +1,4 @@
-AC_INIT("FrameResize","0.1")
+AC_INIT([FrameResize],[0.1])
 
 AM_INIT_AUTOMAKE
 
