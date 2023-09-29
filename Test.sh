@@ -1,7 +1,7 @@
 rm -rf Test/Dst/* >/dev/null 2>&1
-mkdir Test/Dst/Landscape
-mkdir Test/Dst/Portrait
-mkdir Test/Dst/Square
+mkdir -p Test/Dst/Landscape
+mkdir -p Test/Dst/Portrait
+mkdir -p Test/Dst/Square
 
 echo
 echo Landscape test
